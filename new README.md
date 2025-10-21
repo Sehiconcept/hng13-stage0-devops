@@ -5,3 +5,4 @@ This Bash script automates the setup and deployment of a Dockerized application 
 ```bash
 chmod +x deploy.sh
 ./deploy.sh
+34.222.128.254
