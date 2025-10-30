@@ -1,0 +1,65 @@
+version: "3.8"
+
+# Define the shared volume for Nginx logs
+volumes:
+  nginx_logs:
+
+services:
+  app_blue:
+    image: ${BLUE_IMAGE}
+    container_name: app_blue
+    restart: always
+    ports:
+      - "8081:3000" # Direct port for grader
+    environment:
+      - PORT=3000
+      - RELEASE_ID=${RELEASE_ID_BLUE}
+      - APP_POOL=blue
+
+  app_green:
+    image: ${GREEN_IMAGE}
+    container_name: app_green
+    restart: always
+    ports:
+      - "8082:3000" # Direct port for grader
+    environment:
+      - PORT=3000
+      - RELEASE_ID=${RELEASE_ID_GREEN}
+      - APP_POOL=green
+
+  nginx_lb:
+    image: nginx:1.25-alpine
+    container_name: nginx_lb
+    ports:
+      - "8080:80" # Public entrypoint
+    volumes:
+      # Mount the Nginx template
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/default.conf.template
+      # Mount the shared log volume
+      - nginx_logs:/var/log/nginx
+    environment:
+      - ACTIVE_POOL=${ACTIVE_POOL}
+    # This command substitutes the $ACTIVE_POOL variable into the config
+    command: /bin/sh -c "envsubst '$${ACTIVE_POOL}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off';"
+    depends_on:
+      - app_blue
+      - app_green
+    restart: always
+
+  # --- NEW SERVICE ---
+  alert_watcher:
+    build: ./watcher
+    container_name: alert_watcher
+    restart: always
+    volumes:
+      # Mount the shared log volume (read-only)
+      - nginx_logs:/var/log/nginx:ro
+    environment:
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - ACTIVE_POOL=${ACTIVE_POOL}
+      - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD}
+      - WINDOW_SIZE=${WINDOW_SIZE}
+      - ALERT_COOLDOWN_SEC=${ALERT_COOLDOWN_SEC}
+      - MAINTENANCE_MODE=${MAINTENANCE_MODE}
+    depends_on:
+      - nginx_lb

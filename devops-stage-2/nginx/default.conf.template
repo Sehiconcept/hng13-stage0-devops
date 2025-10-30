@@ -1,0 +1,39 @@
+# Define upstreams
+upstream backend_blue {
+    server app_blue:3000 max_fails=3 fail_timeout=10s;
+    server app_green:3000 backup;
+}
+
+upstream backend_green {
+    server app_green:3000 max_fails=3 fail_timeout=10s;
+    server app_blue:3000 backup;
+}
+
+server {
+    listen 80;
+    server_name localhost;
+
+    # Set the active backend based on the environment variable
+    set $active_backend backend_${ACTIVE_POOL};
+
+    location / {
+        # Route to the active backend
+        proxy_pass http://$active_backend;
+
+        # --- Retry & Failover Policy ---
+        proxy_next_upstream error timeout http_5xx non_idempotent;
+        proxy_next_upstream_tries 2;
+
+        # --- Timeouts for fast failover ---
+        proxy_next_upstream_timeout 5s; 
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 5s;
+        proxy_send_timeout 2s;
+
+        # --- Header Forwarding ---
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

@@ -1,116 +1,54 @@
 #!/bin/bash
-# 🚀 HNG Stage 1 DevOps Deploy Script
-# Author: Sehihub
-# Bash script to deploy a Dockerized application on a remote server with Nginx reverse proxy
-
 set -e
-set -o pipefail
 
-LOGFILE="deploy_$(date +%Y%m%d%H%M%S).log"
+echo "🚀 Starting Blue/Green Deployment Setup..."
 
-echo "🚀 Starting Deployment..." | tee -a "$LOGFILE"
-
-# --- Collect User Inputs ---
-read -rp "Enter Git Repository URL: " GIT_REPO
-read -rp "Enter Personal Access Token (PAT): " GIT_PAT
-read -rp "Enter Branch name (default: main): " BRANCH
-BRANCH=${BRANCH:-main}
-
-read -rp "Enter Remote Server Username: " REMOTE_USER
-read -rp "Enter Remote Server IP Address: " REMOTE_IP
-read -rp "Enter Path to SSH Key: " SSH_KEY
-read -rp "Enter Application Port (container internal port): " APP_PORT
-
-echo "📦 Repo exists? Checking locally..."
-REPO_NAME=$(basename -s .git "$GIT_REPO")
-
-if [ -d "$REPO_NAME" ]; then
-    echo "📦 Repo exists. Pulling latest changes..." | tee -a "$LOGFILE"
-    cd "$REPO_NAME"
-    git fetch origin "$BRANCH"
-    git reset --hard "origin/$BRANCH"
+# Load environment variables
+if [ -f .env ]; then
+  echo "📦 Loading environment from .env..."
+  source .env
 else
-    echo "📦 Cloning repository..." | tee -a "$LOGFILE"
-    git clone -b "$BRANCH" "https://$GIT_PAT@${GIT_REPO#https://}" "$REPO_NAME"
-    cd "$REPO_NAME"
+  echo "❌ .env file not found! Please create it or copy from .env.example."
+  exit 1
 fi
 
-# --- Verify Dockerfile or docker-compose.yml ---
-if [[ ! -f Dockerfile && ! -f docker-compose.yml ]]; then
-    echo "❌ No Dockerfile or docker-compose.yml found. Aborting." | tee -a "$LOGFILE"
-    exit 1
+# Check Docker installation
+if ! command -v docker &> /dev/null; then
+  echo "🐳 Docker not found! Installing..."
+  sudo apt update -y && sudo apt install -y docker.io
+  sudo systemctl start docker
+  sudo systemctl enable docker
 fi
 
-# --- Test SSH connection ---
-echo "🔑 Testing SSH connection..."
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_IP" "echo 'SSH connection successful ✅'" | tee -a "$LOGFILE"
-
-# --- Prepare remote environment ---
-echo "⚙️  Setting up remote environment..."
-ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" bash << EOF
-if command -v apt-get &> /dev/null; then
-    sudo apt-get update -y
-    sudo apt-get install -y docker.io docker-compose nginx
-elif command -v dnf &> /dev/null; then
-    sudo dnf update -y
-    sudo dnf install -y docker nginx
-    sudo curl -L "https://github.com/docker/compose/releases/download/v2.22.0/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-else
-    echo "❌ No supported package manager found."
-    exit 1
+# Check Docker Compose installation
+if ! command -v docker compose &> /dev/null; then
+  echo "🧩 Installing Docker Compose plugin..."
+  sudo apt update -y && sudo apt install -y docker-compose-plugin
 fi
 
-sudo systemctl enable --now docker
-sudo systemctl enable --now nginx
-sudo usermod -aG docker $REMOTE_USER || true
-EOF
+# Verify docker works
+docker ps > /dev/null || { echo "❌ Docker daemon not running!"; exit 1; }
 
-# --- Deploy the Dockerized application ---
-echo "🚢 Deploying Dockerized application..."
-ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" bash << EOF
-cd ~
-mkdir -p $REPO_NAME
-rsync -av --exclude='.git' ./ $REMOTE_USER@$REMOTE_IP:~/$REPO_NAME/
-cd $REPO_NAME
+# Pull images
+echo "⬇️  Pulling Blue and Green app images..."
+docker pull "$BLUE_IMAGE"
+docker pull "$GREEN_IMAGE"
 
-if [ -f docker-compose.yml ]; then
-    docker-compose down || true
-    docker-compose up -d --build
-else
-    docker stop $REPO_NAME || true
-    docker rm $REPO_NAME || true
-    docker build -t $REPO_NAME .
-    docker run -d --name $REPO_NAME -p $APP_PORT:$APP_PORT $REPO_NAME
-fi
-EOF
+# Build/refresh Nginx config
+echo "🌀 Generating Nginx config for ACTIVE_POOL=$ACTIVE_POOL ..."
+chmod +x nginx/entrypoint.sh
+./nginx/entrypoint.sh
 
-# --- Configure Nginx ---
-echo "🌐 Configuring Nginx reverse proxy..."
-ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" bash << EOF
-NGINX_CONF="/etc/nginx/conf.d/$REPO_NAME.conf"
-sudo tee \$NGINX_CONF > /dev/null << NGINX
-server {
-    listen 80;
-    server_name $REMOTE_IP;
+# Deploy containers
+echo "🚢 Starting Docker Compose..."
+docker compose up -d --force-recreate
 
-    location / {
-        proxy_pass http://127.0.0.1:$APP_PORT;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-NGINX
+# Wait a bit for services to come up
+echo "⏳ Waiting for services..."
+sleep 10
 
-sudo nginx -t
-sudo systemctl reload nginx
-EOF
+# Verify
+echo "🔍 Checking deployed version:"
+curl -I http://localhost:8080/version || true
 
-# --- Validate Deployment ---
-echo "✅ Deployment finished. Validating..."
-ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_IP" "curl -I http://127.0.0.1:$APP_PORT"
-
-echo "🎉 Deployment complete! Check http://$REMOTE_IP in your browser."
-
+echo "✅ Deployment complete!"

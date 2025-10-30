@@ -1,0 +1,61 @@
+# --- NEW: Structured Log Format ---
+# This captures all the required fields in a machine-readable JSON format
+log_format json_structured escape=json
+  '{'
+    '"timestamp": "$time_iso8601",'
+    '"remote_addr": "$remote_addr",'
+    '"request": "$request",'
+    '"status": $status,'
+    '"body_bytes_sent": $body_bytes_sent,'
+    '"request_time": $request_time,'
+    '"upstream_addr": "$upstream_addr",'
+    '"upstream_status": "$upstream_status",'
+    '"upstream_response_time": $upstream_response_time,'
+    
+    # Custom fields captured from the app's response headers
+    '"pool": "$upstream_http_x_app_pool",'
+    '"release": "$upstream_http_x_release_id"'
+  '}';
+
+
+# --- Upstream Definitions ---
+upstream backend_blue {
+    server app_blue:3000 max_fails=3 fail_timeout=10s;
+    server app_green:3000 backup;
+}
+
+upstream backend_green {
+    server app_green:3000 max_fails=3 fail_timeout=10s;
+    server app_blue:3000 backup;
+}
+
+# --- Server Configuration ---
+server {
+    listen 80;
+    server_name localhost;
+
+    # --- UPDATED: Access Log ---
+    # Use our new structured log format and write to the shared volume
+    access_log /var/log/nginx/access.log json_structured;
+
+    location / {
+        # This variable is substituted by envsubst on container start
+        proxy_pass http://backend_${ACTIVE_POOL};
+
+        # --- Retry & Failover Policy ---
+        proxy_next_upstream error timeout http_5xx non_idempotent;
+        proxy_next_upstream_tries 2;
+
+        # --- Timeouts ---
+        proxy_next_upstream_timeout 60s; 
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+
+        # --- Header Forwarding ---
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
